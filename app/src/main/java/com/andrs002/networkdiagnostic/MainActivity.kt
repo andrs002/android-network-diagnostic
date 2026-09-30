@@ -3,6 +3,7 @@ package com.andrs002.networkdiagnostic
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Bundle
@@ -11,6 +12,7 @@ import android.telephony.CellInfoNr
 import android.telephony.CellIdentityNr
 import android.telephony.CellSignalStrengthNr
 import android.telephony.TelephonyManager
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -28,13 +30,31 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(32, 32, 32, 32) }
-        runButton = Button(this).apply { text = "開始完整網路診斷" }
-        output = TextView(this).apply {
-            text = "Network Diagnostic v2\n\n按上方按鈕開始。會檢查目前傳輸、Android 可見的 LTE/5G 訊號、DNS 與 HTTPS 連線。\n\n一般 App 無法直接讀取 Samsung modem 韌體內部狀態或完整 CA 組合。"
-            textSize = 16f; setTextIsSelectable(true)
+        val density = resources.displayMetrics.density
+        val pad = (16 * density).toInt()
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, pad)
         }
-        box.addView(runButton); box.addView(output)
+        runButton = Button(this).apply {
+            text = "開始完整網路診斷"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.rgb(0, 100, 200))
+            isAllCaps = false
+            minHeight = (64 * density).toInt()
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                (72 * density).toInt()
+            ).apply { bottomMargin = pad }
+        }
+        output = TextView(this).apply {
+            text = "Network Diagnostic v3\n\n按上方藍色按鈕開始。會檢查目前傳輸、Android 可見的 LTE/5G 訊號、DNS 與 HTTPS 連線。\n\n一般 App 無法直接讀取 Samsung modem 韌體內部狀態或完整 CA 組合。"
+            textSize = 16f
+            setTextIsSelectable(true)
+        }
+        box.addView(runButton)
+        box.addView(output)
         setContentView(ScrollView(this).apply { addView(box) })
         runButton.setOnClickListener { permissionsAndRun() }
     }
@@ -43,7 +63,7 @@ class MainActivity : AppCompatActivity() {
         val permissions = arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.ACCESS_FINE_LOCATION)
         val missing = permissions.filter { ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) {
-            output.text = "Network Diagnostic v2\n\n等待權限：${missing.joinToString()}\n允許後會自動開始診斷。"
+            output.text = "Network Diagnostic v3\n\n等待權限：${missing.joinToString()}\n允許後會自動開始診斷。"
             ActivityCompat.requestPermissions(this, missing.toTypedArray(), 7)
         } else diagnose()
     }
@@ -55,7 +75,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun diagnose() {
         runButton.isEnabled = false
-        val sb = StringBuilder("=== Network Diagnostic v2 ===\n")
+        runButton.text = "診斷中…"
+        val sb = StringBuilder("=== Network Diagnostic v3 ===\n")
         try {
             val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             val n = cm.activeNetwork
@@ -71,6 +92,8 @@ class MainActivity : AppCompatActivity() {
             sb.append("Metered: ${c?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) != true}\n")
             val lp = cm.getLinkProperties(n)
             sb.append("DNS servers: ${lp?.dnsServers?.joinToString()}\n")
+            sb.append("Private DNS active: ${lp?.isPrivateDnsActive}\n")
+            sb.append("Private DNS server: ${lp?.privateDnsServerName}\n")
             sb.append("MTU: ${lp?.mtu}\n")
 
             val tm = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
@@ -115,16 +138,26 @@ class MainActivity : AppCompatActivity() {
                     val start = System.nanoTime()
                     try {
                         val conn = URL(address).openConnection() as HttpURLConnection
-                        conn.connectTimeout = 7000; conn.readTimeout = 7000; conn.instanceFollowRedirects = false; conn.connect()
+                        conn.connectTimeout = 7000
+                        conn.readTimeout = 7000
+                        conn.instanceFollowRedirects = false
+                        conn.connect()
                         val code = conn.responseCode
                         val ms = (System.nanoTime() - start) / 1_000_000
-                        sb.append("HTTPS $address: HTTP $code in ${ms}ms\n"); conn.disconnect()
+                        sb.append("HTTPS $address: HTTP $code in ${ms}ms\n")
+                        conn.disconnect()
                     } catch (e: Exception) { sb.append("HTTPS $address: FAIL ${e.javaClass.simpleName}: ${e.message}\n") }
                 }
-                runOnUiThread { output.text = sb.toString(); runButton.isEnabled = true; runButton.text = "重新診斷" }
+                runOnUiThread {
+                    output.text = sb.toString()
+                    runButton.isEnabled = true
+                    runButton.text = "重新診斷"
+                }
             }
         } catch (e: Exception) {
-            output.text = sb.append("\nFATAL: ${e.javaClass.name}: ${e.message}\n").toString(); runButton.isEnabled = true
+            output.text = sb.append("\nFATAL: ${e.javaClass.name}: ${e.message}\n").toString()
+            runButton.isEnabled = true
+            runButton.text = "重新診斷"
         }
     }
 
