@@ -8,6 +8,8 @@ import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.telephony.CellInfoLte
 import android.telephony.CellInfoNr
+import android.telephony.CellIdentityNr
+import android.telephony.CellSignalStrengthNr
 import android.telephony.TelephonyManager
 import android.widget.Button
 import android.widget.LinearLayout
@@ -26,18 +28,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
-        }
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(32, 32, 32, 32) }
         runButton = Button(this).apply { text = "開始完整網路診斷" }
         output = TextView(this).apply {
             text = "Network Diagnostic v2\n\n按上方按鈕開始。會檢查目前傳輸、Android 可見的 LTE/5G 訊號、DNS 與 HTTPS 連線。\n\n一般 App 無法直接讀取 Samsung modem 韌體內部狀態或完整 CA 組合。"
-            textSize = 16f
-            setTextIsSelectable(true)
+            textSize = 16f; setTextIsSelectable(true)
         }
-        box.addView(runButton)
-        box.addView(output)
+        box.addView(runButton); box.addView(output)
         setContentView(ScrollView(this).apply { addView(box) })
         runButton.setOnClickListener { permissionsAndRun() }
     }
@@ -94,57 +91,40 @@ class MainActivity : AppCompatActivity() {
                             sb.append("LTE registered=${cell.isRegistered} pci=${id.pci} earfcn=${id.earfcn} rsrp=${s.rsrp} rsrq=${s.rsrq} rssi=${s.rssi} rssnr=${s.rssnr}\n")
                         }
                         is CellInfoNr -> {
-                            val s = cell.cellSignalStrength
-                            val id = cell.cellIdentity
+                            val s = cell.cellSignalStrength as CellSignalStrengthNr
+                            val id = cell.cellIdentity as CellIdentityNr
                             sb.append("NR registered=${cell.isRegistered} pci=${id.pci} nrarfcn=${id.nrarfcn} ssRsrp=${s.ssRsrp} ssRsrq=${s.ssRsrq} ssSinr=${s.ssSinr}\n")
                         }
                         else -> sb.append("${cell.javaClass.simpleName} registered=${cell.isRegistered}\n")
                     }
                 }
-            } catch (e: Exception) {
-                sb.append("Cell info error: ${e.javaClass.simpleName}: ${e.message}\n")
-            }
+            } catch (e: Exception) { sb.append("Cell info error: ${e.javaClass.simpleName}: ${e.message}\n") }
 
             sb.append("\n--- DNS / HTTPS tests ---\n")
             output.text = sb.append("Running...\n").toString()
-
             thread {
-                val hosts = listOf("google.com", "github.com", "cloudflare.com")
-                hosts.forEach { host ->
+                listOf("google.com", "github.com", "cloudflare.com").forEach { host ->
                     val start = System.nanoTime()
                     try {
                         val addresses = InetAddress.getAllByName(host)
                         val ms = (System.nanoTime() - start) / 1_000_000
                         sb.append("DNS $host: OK ${ms}ms -> ${addresses.firstOrNull()?.hostAddress}\n")
-                    } catch (e: Exception) {
-                        sb.append("DNS $host: FAIL ${e.javaClass.simpleName}: ${e.message}\n")
-                    }
+                    } catch (e: Exception) { sb.append("DNS $host: FAIL ${e.javaClass.simpleName}: ${e.message}\n") }
                 }
                 listOf("https://www.google.com/generate_204", "https://www.cloudflare.com/cdn-cgi/trace").forEach { address ->
                     val start = System.nanoTime()
                     try {
                         val conn = URL(address).openConnection() as HttpURLConnection
-                        conn.connectTimeout = 7000
-                        conn.readTimeout = 7000
-                        conn.instanceFollowRedirects = false
-                        conn.connect()
+                        conn.connectTimeout = 7000; conn.readTimeout = 7000; conn.instanceFollowRedirects = false; conn.connect()
                         val code = conn.responseCode
                         val ms = (System.nanoTime() - start) / 1_000_000
-                        sb.append("HTTPS $address: HTTP $code in ${ms}ms\n")
-                        conn.disconnect()
-                    } catch (e: Exception) {
-                        sb.append("HTTPS $address: FAIL ${e.javaClass.simpleName}: ${e.message}\n")
-                    }
+                        sb.append("HTTPS $address: HTTP $code in ${ms}ms\n"); conn.disconnect()
+                    } catch (e: Exception) { sb.append("HTTPS $address: FAIL ${e.javaClass.simpleName}: ${e.message}\n") }
                 }
-                runOnUiThread {
-                    output.text = sb.toString()
-                    runButton.isEnabled = true
-                    runButton.text = "重新診斷"
-                }
+                runOnUiThread { output.text = sb.toString(); runButton.isEnabled = true; runButton.text = "重新診斷" }
             }
         } catch (e: Exception) {
-            output.text = sb.append("\nFATAL: ${e.javaClass.name}: ${e.message}\n").toString()
-            runButton.isEnabled = true
+            output.text = sb.append("\nFATAL: ${e.javaClass.name}: ${e.message}\n").toString(); runButton.isEnabled = true
         }
     }
 
