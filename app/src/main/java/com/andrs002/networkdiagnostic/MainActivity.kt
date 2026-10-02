@@ -2,12 +2,10 @@ package com.andrs002.networkdiagnostic
 
 import android.Manifest
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.*
 import android.os.Bundle
-import android.provider.Settings
 import android.telephony.*
 import android.view.ViewGroup
 import android.widget.*
@@ -26,60 +24,136 @@ class MainActivity : AppCompatActivity() {
     private lateinit var stopButton: Button
     private val executor=Executors.newSingleThreadScheduledExecutor()
     private var monitor:ScheduledFuture<*>?=null
-    private val log=StringBuilder()
+    private val lines=ArrayDeque<String>()
     private var sample=0
     @Volatile private var netEvent="INIT"
-    private var lossStartedAt:Long?=null
-    private var recoveryPrompted=false
+    private var failureStartedAt:Long?=null
+    private var recoveryAttempts=0
+    private var recoveryNetwork:Network?=null
+    private var recoveryCallback:ConnectivityManager.NetworkCallback?=null
     private var lastGoodCell=""
+    private var lastDnsOk=true
+    private var lastHttpsOk=true
 
     private fun now()=SimpleDateFormat("HH:mm:ss.SSS",Locale.US).format(Date())
-    @Synchronized private fun appendLine(s:String){log.append(s).append('\n')}
+    @Synchronized private fun appendLine(s:String){lines.addLast(s);while(lines.size>900)lines.removeFirst()}
+    @Synchronized private fun currentLog()=lines.joinToString("\n")
     private fun callbackEvent(s:String){netEvent=s;appendLine("EVENT,${now()},${s.replace(',',';')}")}
 
     override fun onCreate(savedInstanceState:Bundle?){
         super.onCreate(savedInstanceState)
         val d=resources.displayMetrics.density;val pad=(16*d).toInt()
         val box=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(pad,pad,pad,pad)}
-        runButton=Button(this).apply{text="開始 LTE 掉線保護 v7";textSize=18f;setTextColor(Color.WHITE);setBackgroundColor(Color.rgb(0,100,200));isAllCaps=false;layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,(72*d).toInt()).apply{bottomMargin=pad}}
+        runButton=Button(this).apply{text="開始網路自動補救 v8";textSize=18f;setTextColor(Color.WHITE);setBackgroundColor(Color.rgb(0,100,200));isAllCaps=false;layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,(72*d).toInt()).apply{bottomMargin=pad}}
         stopButton=Button(this).apply{text="停止監測";isAllCaps=false;isEnabled=false}
-        output=TextView(this).apply{text="Network Diagnostic v7\n\n監測 LTE 註冊遺失；持續 15 秒會記錄故障，30 秒仍未恢復時開啟系統網路設定供快速重連。一般 App 無權直接重啟 modem。";textSize=14f;setTextIsSelectable(true)}
+        output=TextView(this).apply{text="Network Diagnostic v8\n掉線或 DNS/HTTPS 連續失敗時，主動向 Android 請求新的 CELLULAR+INTERNET 網路並把本 App 的連線綁到恢復後的 cellular network。這不是 modem/radio 強制重註冊。Log 僅保留最近 900 行，不寫大型檔案。";textSize=14f;setTextIsSelectable(true)}
         box.addView(runButton);box.addView(stopButton);box.addView(output);setContentView(ScrollView(this).apply{addView(box)})
         runButton.setOnClickListener{permissionsAndRun()};stopButton.setOnClickListener{stopMonitor()}
     }
-    private fun permissionsAndRun(){val p=arrayOf(Manifest.permission.READ_PHONE_STATE,Manifest.permission.ACCESS_FINE_LOCATION);val m=p.filter{ActivityCompat.checkSelfPermission(this,it)!=PackageManager.PERMISSION_GRANTED};if(m.isNotEmpty())ActivityCompat.requestPermissions(this,m.toTypedArray(),7)else startMonitor()}
-    override fun onRequestPermissionsResult(r:Int,p:Array<out String>,g:IntArray){super.onRequestPermissionsResult(r,p,g);if(r==7&&g.all{it==PackageManager.PERMISSION_GRANTED})startMonitor()}
+    private fun permissionsAndRun(){val p=arrayOf(Manifest.permission.READ_PHONE_STATE,Manifest.permission.ACCESS_FINE_LOCATION);val m=p.filter{ActivityCompat.checkSelfPermission(this,it)!=PackageManager.PERMISSION_GRANTED};if(m.isNotEmpty())ActivityCompat.requestPermissions(this,m.toTypedArray(),8)else startMonitor()}
+    override fun onRequestPermissionsResult(r:Int,p:Array<out String>,g:IntArray){super.onRequestPermissionsResult(r,p,g);if(r==8&&g.all{it==PackageManager.PERMISSION_GRANTED})startMonitor()}
 
-    private val callback=object:ConnectivityManager.NetworkCallback(){override fun onAvailable(n:Network)=callbackEvent("AVAILABLE:$n");override fun onLost(n:Network)=callbackEvent("LOST:$n");override fun onLosing(n:Network,maxMs:Int)=callbackEvent("LOSING:$n:$maxMs");override fun onUnavailable()=callbackEvent("UNAVAILABLE");override fun onCapabilitiesChanged(n:Network,c:NetworkCapabilities){callbackEvent("CAP:$n:${if(c.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR))"CELL" else if(c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI))"WIFI" else "OTHER"}:VALID=${c.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)}")};override fun onLinkPropertiesChanged(n:Network,lp:LinkProperties)=callbackEvent("LINK:$n:DNS=${lp.dnsServers.joinToString("+")}:IF=${lp.interfaceName}")}
-
-    private fun startMonitor(){monitor?.cancel(false);synchronized(this){log.clear()};sample=0;netEvent="START";lossStartedAt=null;recoveryPrompted=false;lastGoodCell="";val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager;try{cm.unregisterNetworkCallback(callback)}catch(_:Exception){};cm.registerDefaultNetworkCallback(callback);appendLine("=== Network Diagnostic v7 LTE watchdog ===");appendLine("SAMPLE,time,n,transport,rat,voiceReg,dataState,lastEvent,registered,pci,earfcn,band,tac,ci,rsrp,rsrq,rssi,sinr,dns,https,watchdog");runButton.isEnabled=false;stopButton.isEnabled=true;monitor=executor.scheduleAtFixedRate({takeSample()},0,1,TimeUnit.SECONDS)}
-
-    private fun handleWatchdog(registered:Boolean, transport:String, cell:String):String{
-        val bad=!registered || transport=="NONE"
-        val t=System.currentTimeMillis()
-        if(!bad){
-            if(cell.isNotBlank()) lastGoodCell=cell
-            val start=lossStartedAt
-            if(start!=null){val sec=(t-start)/1000;appendLine("WATCHDOG,${now()},RECOVERED,${sec}s,from=$lastGoodCell,to=$cell");lossStartedAt=null;recoveryPrompted=false;return "RECOVERED:${sec}s"}
-            return "OK"
-        }
-        if(lossStartedAt==null){lossStartedAt=t;appendLine("WATCHDOG,${now()},LOSS_START,lastCell=$lastGoodCell");return "LOSS_START"}
-        val sec=(t-lossStartedAt!!)/1000
-        if(sec>=15 && sec<30) return "LOSS_CONFIRMED:${sec}s"
-        if(sec>=30 && !recoveryPrompted){
-            recoveryPrompted=true
-            appendLine("WATCHDOG,${now()},RECOVERY_ASSIST,${sec}s,open_network_settings")
-            runOnUiThread{
-                Toast.makeText(this,"行動網路已失去約 ${sec} 秒，開啟網路設定供快速重連",Toast.LENGTH_LONG).show()
-                try{startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))}catch(_:Exception){try{startActivity(Intent(Settings.ACTION_SETTINGS))}catch(_:Exception){}}
-            }
-            return "RECOVERY_ASSIST:${sec}s"
-        }
-        return "LOSS:${sec}s"
+    private val defaultCallback=object:ConnectivityManager.NetworkCallback(){
+        override fun onAvailable(n:Network)=callbackEvent("AVAILABLE:$n")
+        override fun onLost(n:Network)=callbackEvent("LOST:$n")
+        override fun onLosing(n:Network,maxMs:Int)=callbackEvent("LOSING:$n:$maxMs")
+        override fun onUnavailable()=callbackEvent("UNAVAILABLE")
+        override fun onCapabilitiesChanged(n:Network,c:NetworkCapabilities)=callbackEvent("CAP:$n:${if(c.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR))"CELL" else if(c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI))"WIFI" else "OTHER"}:VALID=${c.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)}")
+        override fun onLinkPropertiesChanged(n:Network,lp:LinkProperties)=callbackEvent("LINK:$n:DNS=${lp.dnsServers.joinToString("+")}:IF=${lp.interfaceName}")
     }
 
-    private fun takeSample(){sample++;var transport="NONE";var rat="?";var voice="?";var dataState="?";var registered=false;var pci="";var earfcn="";var band="";var tac="";var ci="";var rsrp="";var rsrq="";var rssi="";var sinr="";var dns="-";var https="-";try{val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager;val caps=cm.getNetworkCapabilities(cm.activeNetwork);transport=when{caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)==true->"CELLULAR";caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)==true->"WIFI";else->"NONE"};val tm=getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager;rat=when(tm.dataNetworkType){TelephonyManager.NETWORK_TYPE_LTE->"LTE";TelephonyManager.NETWORK_TYPE_NR->"NR";else->tm.dataNetworkType.toString()};val ss=tm.serviceState;voice=when(ss?.state){ServiceState.STATE_IN_SERVICE->"IN";ServiceState.STATE_OUT_OF_SERVICE->"OUT";ServiceState.STATE_EMERGENCY_ONLY->"EMERGENCY";ServiceState.STATE_POWER_OFF->"OFF";else->"?"};dataState=when(tm.dataState){TelephonyManager.DATA_CONNECTED->"CONNECTED";TelephonyManager.DATA_CONNECTING->"CONNECTING";TelephonyManager.DATA_DISCONNECTED->"DISCONNECTED";TelephonyManager.DATA_SUSPENDED->"SUSPENDED";else->tm.dataState.toString()};val serving=tm.allCellInfo?.firstOrNull{it.isRegistered};when(serving){is CellInfoLte->{val s=serving.cellSignalStrength;val id=serving.cellIdentity;registered=true;pci=id.pci.toString();earfcn=id.earfcn.toString();band=try{id.bands.joinToString("+")}catch(_:Exception){""};tac=id.tac.toString();ci=id.ci.toString();rsrp=s.rsrp.toString();rsrq=s.rsrq.toString();rssi=s.rssi.toString();sinr=s.rssnr.toString()};is CellInfoNr->{val s=serving.cellSignalStrength as CellSignalStrengthNr;val id=serving.cellIdentity as CellIdentityNr;registered=true;pci=id.pci.toString();earfcn=id.nrarfcn.toString();band=try{id.bands.joinToString("+")}catch(_:Exception){""};tac=id.tac.toString();ci=id.nci.toString();rsrp=s.ssRsrp.toString();rsrq=s.ssRsrq.toString();sinr=s.ssSinr.toString()}};if(sample%5==0){val td=System.nanoTime();try{val a=InetAddress.getAllByName("google.com");dns="OK:${(System.nanoTime()-td)/1_000_000}ms:${a.firstOrNull()?.hostAddress}"}catch(e:Exception){dns="FAIL:${e.javaClass.simpleName}"};val th=System.nanoTime();try{val h=URL("https://www.google.com/generate_204").openConnection() as HttpURLConnection;h.connectTimeout=4000;h.readTimeout=4000;h.useCaches=false;h.connect();https="${h.responseCode}:${(System.nanoTime()-th)/1_000_000}ms";h.disconnect()}catch(e:Exception){https="FAIL:${e.javaClass.simpleName}"}}}catch(e:Exception){https="ERR:${e.javaClass.simpleName}"};val cell="$pci/$earfcn/$ci";val watchdog=handleWatchdog(registered,transport,cell);appendLine("SAMPLE,${now()},$sample,$transport,$rat,$voice,$dataState,${netEvent.replace(',',';')},$registered,$pci,$earfcn,$band,$tac,$ci,$rsrp,$rsrq,$rssi,$sinr,$dns,$https,$watchdog");val text=synchronized(this){log.toString()};runOnUiThread{output.text=text.takeLast(30000)}}
+    private fun startMonitor(){
+        monitor?.cancel(false);synchronized(this){lines.clear()};sample=0;netEvent="START";failureStartedAt=null;recoveryAttempts=0;lastGoodCell="";lastDnsOk=true;lastHttpsOk=true
+        val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        try{cm.unregisterNetworkCallback(defaultCallback)}catch(_:Exception){}
+        cm.registerDefaultNetworkCallback(defaultCallback)
+        appendLine("=== Network Diagnostic v8 active connection recovery ===")
+        appendLine("SAMPLE,time,n,transport,rat,voiceReg,dataState,lastEvent,registered,pci,earfcn,band,tac,ci,rsrp,rsrq,rssi,sinr,dns,https,recovery")
+        runButton.isEnabled=false;stopButton.isEnabled=true
+        monitor=executor.scheduleAtFixedRate({takeSample()},0,1,TimeUnit.SECONDS)
+    }
 
-    private fun stopMonitor(){monitor?.cancel(false);monitor=null;try{(getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(callback)}catch(_:Exception){};runButton.isEnabled=true;stopButton.isEnabled=false;output.text=synchronized(this){log.toString().takeLast(60000)}}
-    override fun onDestroy(){monitor?.cancel(true);try{(getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(callback)}catch(_:Exception){};executor.shutdownNow();super.onDestroy()}
+    private fun requestCellularRecovery(reason:String):String{
+        val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        recoveryAttempts++
+        val attempt=recoveryAttempts
+        appendLine("RECOVERY,${now()},REQUEST_CELLULAR,attempt=$attempt,reason=$reason")
+        recoveryCallback?.let{try{cm.unregisterNetworkCallback(it)}catch(_:Exception){}}
+        val cb=object:ConnectivityManager.NetworkCallback(){
+            override fun onAvailable(network:Network){
+                recoveryNetwork=network
+                val bound=cm.bindProcessToNetwork(network)
+                appendLine("RECOVERY,${now()},CELLULAR_AVAILABLE,attempt=$attempt,network=$network,bound=$bound")
+                executor.execute{probeOnNetwork(network,attempt)}
+            }
+            override fun onCapabilitiesChanged(network:Network,caps:NetworkCapabilities){
+                if(caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) appendLine("RECOVERY,${now()},VALIDATED,attempt=$attempt,network=$network")
+            }
+            override fun onLost(network:Network){appendLine("RECOVERY,${now()},RECOVERY_NETWORK_LOST,attempt=$attempt,network=$network")}
+            override fun onUnavailable(){appendLine("RECOVERY,${now()},UNAVAILABLE,attempt=$attempt")}
+        }
+        recoveryCallback=cb
+        val req=NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR).addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build()
+        try{cm.requestNetwork(req,cb,10000)}catch(e:Exception){appendLine("RECOVERY,${now()},REQUEST_FAILED,attempt=$attempt,${e.javaClass.simpleName}")}
+        return "REQUEST_CELLULAR#$attempt"
+    }
+
+    private fun probeOnNetwork(network:Network,attempt:Int){
+        try{
+            val addrs=network.getAllByName("ep-autumn-shadow-aesref0t.apirest.c-2.us-east-2.aws.neon.tech")
+            appendLine("RECOVERY,${now()},NEON_DNS_OK,attempt=$attempt,ip=${addrs.firstOrNull()?.hostAddress}")
+            val c=network.openConnection(URL("https://www.google.com/generate_204")) as HttpURLConnection
+            c.connectTimeout=4000;c.readTimeout=4000;c.useCaches=false;c.connect()
+            appendLine("RECOVERY,${now()},HTTPS_OK,attempt=$attempt,code=${c.responseCode}");c.disconnect()
+        }catch(e:Exception){appendLine("RECOVERY,${now()},PROBE_FAIL,attempt=$attempt,${e.javaClass.simpleName}:${e.message}")}
+    }
+
+    private fun recoveryState(registered:Boolean,transport:String,dnsOk:Boolean,httpsOk:Boolean,cell:String):String{
+        if(cell.isNotBlank())lastGoodCell=cell
+        val badRadio=!registered || transport=="NONE"
+        val badData=!dnsOk || !httpsOk
+        val bad=badRadio || badData
+        val t=System.currentTimeMillis()
+        if(!bad){
+            val start=failureStartedAt
+            if(start!=null){val sec=(t-start)/1000;appendLine("RECOVERY,${now()},RECOVERED,${sec}s,attempts=$recoveryAttempts,cell=$cell");failureStartedAt=null;recoveryAttempts=0;return "RECOVERED:${sec}s"}
+            return "OK"
+        }
+        if(failureStartedAt==null){failureStartedAt=t;appendLine("RECOVERY,${now()},FAILURE_START,radio=$badRadio,data=$badData,lastCell=$lastGoodCell");return "FAILURE_START"}
+        val sec=(t-failureStartedAt!!)/1000
+        if(sec>=5 && (recoveryAttempts==0 || (sec>=15 && recoveryAttempts==1) || (sec>=30 && recoveryAttempts==2))) return requestCellularRecovery(if(badRadio)"RADIO_OR_REGISTRATION" else "DNS_OR_HTTPS")
+        return "WAIT:${sec}s"
+    }
+
+    private fun takeSample(){
+        sample++;var transport="NONE";var rat="?";var voice="?";var dataState="?";var registered=false;var pci="";var earfcn="";var band="";var tac="";var ci="";var rsrp="";var rsrq="";var rssi="";var sinr="";var dns="-";var https="-"
+        var dnsOk=lastDnsOk;var httpsOk=lastHttpsOk
+        try{
+            val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager;val caps=cm.getNetworkCapabilities(cm.activeNetwork)
+            transport=when{caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)==true->"CELLULAR";caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)==true->"WIFI";else->"NONE"}
+            val tm=getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+            rat=when(tm.dataNetworkType){TelephonyManager.NETWORK_TYPE_LTE->"LTE";TelephonyManager.NETWORK_TYPE_NR->"NR";else->tm.dataNetworkType.toString()}
+            val ss=tm.serviceState;voice=when(ss?.state){ServiceState.STATE_IN_SERVICE->"IN";ServiceState.STATE_OUT_OF_SERVICE->"OUT";ServiceState.STATE_EMERGENCY_ONLY->"EMERGENCY";ServiceState.STATE_POWER_OFF->"OFF";else->"?"}
+            dataState=when(tm.dataState){TelephonyManager.DATA_CONNECTED->"CONNECTED";TelephonyManager.DATA_CONNECTING->"CONNECTING";TelephonyManager.DATA_DISCONNECTED->"DISCONNECTED";TelephonyManager.DATA_SUSPENDED->"SUSPENDED";else->tm.dataState.toString()}
+            val serving=tm.allCellInfo?.firstOrNull{it.isRegistered}
+            when(serving){
+                is CellInfoLte->{val s=serving.cellSignalStrength;val id=serving.cellIdentity;registered=true;pci=id.pci.toString();earfcn=id.earfcn.toString();band=try{id.bands.joinToString("+")}catch(_:Exception){""};tac=id.tac.toString();ci=id.ci.toString();rsrp=s.rsrp.toString();rsrq=s.rsrq.toString();rssi=s.rssi.toString();sinr=s.rssnr.toString()}
+                is CellInfoNr->{val s=serving.cellSignalStrength as CellSignalStrengthNr;val id=serving.cellIdentity as CellIdentityNr;registered=true;pci=id.pci.toString();earfcn=id.nrarfcn.toString();band=try{id.bands.joinToString("+")}catch(_:Exception){""};tac=id.tac.toString();ci=id.nci.toString();rsrp=s.ssRsrp.toString();rsrq=s.ssRsrq.toString();sinr=s.ssSinr.toString()}
+            }
+            if(sample%5==0){
+                val td=System.nanoTime();try{val a=InetAddress.getAllByName("ep-autumn-shadow-aesref0t.apirest.c-2.us-east-2.aws.neon.tech");dnsOk=true;dns="OK:${(System.nanoTime()-td)/1_000_000}ms:${a.firstOrNull()?.hostAddress}"}catch(e:Exception){dnsOk=false;dns="FAIL:${e.javaClass.simpleName}"};lastDnsOk=dnsOk
+                val th=System.nanoTime();try{val h=URL("https://www.google.com/generate_204").openConnection() as HttpURLConnection;h.connectTimeout=4000;h.readTimeout=4000;h.useCaches=false;h.connect();httpsOk=h.responseCode in 200..399;https="${h.responseCode}:${(System.nanoTime()-th)/1_000_000}ms";h.disconnect()}catch(e:Exception){httpsOk=false;https="FAIL:${e.javaClass.simpleName}"};lastHttpsOk=httpsOk
+            }
+        }catch(e:Exception){httpsOk=false;lastHttpsOk=false;https="ERR:${e.javaClass.simpleName}"}
+        val cell="$pci/$earfcn/$ci";val recovery=recoveryState(registered,transport,dnsOk,httpsOk,cell)
+        appendLine("SAMPLE,${now()},$sample,$transport,$rat,$voice,$dataState,${netEvent.replace(',',';')},$registered,$pci,$earfcn,$band,$tac,$ci,$rsrp,$rsrq,$rssi,$sinr,$dns,$https,$recovery")
+        val text=currentLog();runOnUiThread{output.text=text.takeLast(50000)}
+    }
+
+    private fun stopMonitor(){
+        monitor?.cancel(false);monitor=null;val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        try{cm.unregisterNetworkCallback(defaultCallback)}catch(_:Exception){};recoveryCallback?.let{try{cm.unregisterNetworkCallback(it)}catch(_:Exception){}};cm.bindProcessToNetwork(null)
+        runButton.isEnabled=true;stopButton.isEnabled=false;output.text=currentLog().takeLast(60000)
+    }
+    override fun onDestroy(){stopMonitor();executor.shutdownNow();super.onDestroy()}
 }
