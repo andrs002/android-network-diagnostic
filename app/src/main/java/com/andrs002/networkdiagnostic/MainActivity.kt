@@ -2,9 +2,12 @@ package com.andrs002.networkdiagnostic
 
 import android.Manifest
 import android.content.Context
+import android.content.ComponentName
 import android.content.res.ColorStateList
 import android.content.Intent
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -32,6 +35,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class MainActivity : AppCompatActivity() {
     private lateinit var output:TextView; private lateinit var statusLine:TextView; private lateinit var runButton:Button; private lateinit var stopButton:Button; private lateinit var grantButton:Button; private lateinit var resetNowButton:Button; private lateinit var telemetry:TelemetryUploader; private lateinit var shizukuRecovery:ShizukuRecovery
     private val executor=Executors.newSingleThreadScheduledExecutor(); private val uploadExecutor=Executors.newSingleThreadExecutor(); private var monitor:ScheduledFuture<*>?=null
+    private val uiHandler = Handler(Looper.getMainLooper())
     private val cycling=AtomicBoolean(false);@Volatile private var lastDataCycleAt=0L
     private val lines=ArrayDeque<String>(); private var sample=0; @Volatile private var netEvent="INIT"; private var failureStartedAt:Long?=null; private var recoveryAttempts=0; private var nextRecoveryAt=0L; private var recoveryCallback:ConnectivityManager.NetworkCallback?=null
     private var lastGoodCell=""; private var lastDnsOk=true; private var lastHttpsOk=true; @Volatile private var lastRegisteredAt=0L
@@ -206,21 +210,73 @@ class MainActivity : AppCompatActivity() {
             }
         }
         grantButton.setOnClickListener {
-            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-            Toast.makeText(this, "請啟用「網路診斷：快速重連輔助」", Toast.LENGTH_LONG).show()
+            val enabled = isQuickRecoveryEnabledByAndroid()
+            if (enabled) {
+                updateQuickRecoveryStatus()
+                if (QuickPanelRecoveryService.active == null) {
+                    Toast.makeText(this, "系統已開啟輔助服務，但程式尚未連線，請稍候再檢查", Toast.LENGTH_LONG).show()
+                    appendLine("ACCESSIBILITY," + now() + ",ENABLED_BUT_NOT_CONNECTED")
+                    uploadSnapshot("ACCESSIBILITY_ENABLED_NOT_CONNECTED")
+                    scheduleRecoveryStatusChecks()
+                } else {
+                    Toast.makeText(this, "輔助重連服務已連線", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                Toast.makeText(this, "請啟用「網路診斷：快速重連輔助」", Toast.LENGTH_LONG).show()
+            }
         }
         runButton.setOnClickListener { permissionsAndRun() }
         stopButton.setOnClickListener { stopMonitor() }
         resetNowButton.setOnClickListener { beginManualRecovery() }
     }
 
+    /** Reads actual Android accessibility settings, not only the service singleton. */
+    private fun isQuickRecoveryEnabledByAndroid(): Boolean {
+        val target = ComponentName(this, QuickPanelRecoveryService::class.java)
+        return try {
+            val setting = Settings.Secure.getString(
+                contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            ).orEmpty()
+            setting.split(':').any { entry ->
+                val component = ComponentName.unflattenFromString(entry.trim())
+                component?.packageName == target.packageName &&
+                    component.className == target.className
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun updateQuickRecoveryStatus() {
+        if (!::statusLine.isInitialized) return
+        val enabledInSystem = isQuickRecoveryEnabledByAndroid()
+        val connected = QuickPanelRecoveryService.active != null
+        statusLine.text = when {
+            connected -> "輔助重連：已連線，可以手動測試"
+            enabledInSystem -> "輔助重連：系統已開啟，等待服務連線"
+            else -> "輔助重連：系統尚未啟用"
+        }
+        grantButton.text = when {
+            connected -> "輔助重連已連線"
+            enabledInSystem -> "重新檢查輔助服務連線"
+            else -> "啟用輔助重連（不需 Shizuku）"
+        }
+        appendLine(
+            "ACCESSIBILITY," + now() + ",ENABLED_IN_SYSTEM=" +
+                enabledInSystem + ",SERVICE_CONNECTED=" + connected
+        )
+    }
+
+    private fun scheduleRecoveryStatusChecks() {
+        uiHandler.postDelayed({ if (!isFinishing && !isDestroyed) updateQuickRecoveryStatus() }, 700L)
+        uiHandler.postDelayed({ if (!isFinishing && !isDestroyed) updateQuickRecoveryStatus() }, 2200L)
+    }
+
     override fun onResume() {
         super.onResume()
-        if (::statusLine.isInitialized) {
-            statusLine.text = if (QuickPanelRecoveryService.active != null)
-                "輔助重連：已啟用（手動模式）"
-            else "輔助重連：尚未啟用（請按下方授權）"
-        }
+        updateQuickRecoveryStatus()
+        scheduleRecoveryStatusChecks()
     }
 
     private fun beginManualRecovery() {
@@ -262,9 +318,15 @@ class MainActivity : AppCompatActivity() {
                     output.text = currentLog().takeLast(60000)
                 }
             }
+        } else if (isQuickRecoveryEnabledByAndroid()) {
+            statusLine.text = "系統已授權，服務尚未連線，請稍後再按重連"
+            appendLine("ACCESSIBILITY," + now() + ",ENABLED_BUT_NO_SERVICE")
+            uploadSnapshot("ACCESSIBILITY_ENABLED_NO_SERVICE")
+            Toast.makeText(this, "無障礙服務已開啟，但尚未連線；不必重新授權", Toast.LENGTH_LONG).show()
+            scheduleRecoveryStatusChecks()
         } else {
             Toast.makeText(
-                this, "先啟用本 App 的「網路診斷：快速重連輔助」，不需要 Shizuku",
+                this, "請先啟用「網路診斷：快速重連輔助」服務",
                 Toast.LENGTH_LONG
             ).show()
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
@@ -307,5 +369,5 @@ class MainActivity : AppCompatActivity() {
         catch(e:Exception){hok=false;lastHttpsOk=false;https="ERR:${e.javaClass.simpleName}"};val cell="$pci/$ef/$ci";val rec=recoveryState(reg,tr,dok,hok,cell);appendLine("SAMPLE,${now()},$sample,$tr,$rat,$voice,$ds,${netEvent.replace(',',';')},$reg,$pci,$ef,$band,$tac,$ci,$rsrp,$rsrq,$rssi,$sinr,$dns,$https,$rec");if(sample%10==0)uploadSnapshot("LIVE_STATUS:$tr:$rat:reg=$reg:pci=$pci:earfcn=$ef:band=$band:rsrp=$rsrp:rsrq=$rsrq:sinr=$sinr:dns=$dns:https=$https:recovery=$rec");val text=currentLog();runOnUiThread{output.text=text.takeLast(60000)}}
 
     private fun stopMonitor(){stopService(Intent(this,NetworkMonitorService::class.java));monitor?.cancel(false);monitor=null;val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager;try{cm.unregisterNetworkCallback(defaultCallback)}catch(_:Exception){};recoveryCallback?.let{try{cm.unregisterNetworkCallback(it)}catch(_:Exception){}};recoveryCallback=null;cm.bindProcessToNetwork(null);uploadSnapshot("MONITOR_STOPPED_V12");runButton.isEnabled=true;stopButton.isEnabled=false;output.text=currentLog().takeLast(60000)}
-    override fun onDestroy(){stopMonitor();shizukuRecovery.close();executor.shutdownNow();uploadExecutor.shutdown();super.onDestroy()}
+    override fun onDestroy(){uiHandler.removeCallbacksAndMessages(null);stopMonitor();shizukuRecovery.close();executor.shutdownNow();uploadExecutor.shutdown();super.onDestroy()}
 }
