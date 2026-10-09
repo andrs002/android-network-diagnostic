@@ -1,0 +1,4 @@
+<resources>
+    <string name="quick_panel_recovery_label">網路診斷：快速重連輔助</string>
+    <string name="quick_panel_recovery_description">僅在你按下「立即重連」時，辨識並操作系統快速設定中的「行動數據」開關；不需要 Shizuku、Wi-Fi 或電腦。必須由你手動授權，成功與否依 Samsung 系統介面而定。不讀取其他 App 內容。</string>
+</resources>
