@@ -15,6 +15,9 @@ import android.view.ViewGroup
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -39,6 +42,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
+        // Android 15/16 enforce edge-to-edge; keep actionable controls clear of
+        // status and gesture/navigation bars on Samsung and other devices.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        supportActionBar?.hide()
         telemetry = TelemetryUploader(applicationContext)
         val density = resources.displayMetrics.density
         val dp = { value: Int -> (value * density + 0.5f).toInt() }
@@ -48,7 +55,20 @@ class MainActivity : AppCompatActivity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.WHITE)
-            setPadding(dp(12), dp(8), dp(12), 0)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, windowInsets ->
+            val safe = windowInsets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            view.setPadding(
+                dp(12) + safe.left,
+                dp(8) + safe.top,
+                dp(12) + safe.right,
+                dp(8) + safe.bottom
+            )
+            windowInsets
         }
 
         val heading = TextView(this).apply {
@@ -61,7 +81,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(heading)
 
         output = TextView(this).apply {
-            text = "監測尚未啟動。\\n真正的數據重連需先授權 Shizuku。"
+            text = "監測尚未啟動。\n真正的數據重連需先授權 Shizuku。"
             textSize = 12f
             typeface = Typeface.MONOSPACE
             setTextColor(Color.rgb(30, 40, 50))
@@ -91,6 +111,7 @@ class MainActivity : AppCompatActivity() {
             text = "Shizuku：尚未連線"
             textSize = 13f
             setTextColor(Color.rgb(55, 65, 80))
+            maxLines = 2
             setPadding(dp(4), 0, dp(4), dp(7))
         }
         controls.addView(statusLine)
@@ -176,6 +197,9 @@ class MainActivity : AppCompatActivity() {
                     message == "SHIZUKU_SERVICE_READY" -> "Shizuku：已授權，可使用重連"
                     message == "SHIZUKU_BINDING_SERVICE" -> "Shizuku：正在連線…"
                     message == "SHIZUKU_REQUESTING_PERMISSION" -> "Shizuku：等待授權"
+                    message.startsWith("SHIZUKU_NOT_RUNNING") -> "Shizuku：未啟動，請先啟動 Shizuku App"
+                    message == "SHIZUKU_PERMISSION_DENIED" -> "Shizuku：權限未允許"
+                    message == "SHIZUKU_BINDER_DEAD" -> "Shizuku：連線中斷，請重新啟動"
                     else -> "Shizuku：" + message
                 }
             }
