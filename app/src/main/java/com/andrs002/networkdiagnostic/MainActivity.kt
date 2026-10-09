@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.content.Intent
 import android.os.Build
+import android.provider.Settings
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
@@ -72,7 +73,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val heading = TextView(this).apply {
-            text = "網路診斷 v11　｜　監測紀錄"
+            text = "網路診斷 v12　｜　監測紀錄"
             setTextColor(Color.rgb(35, 45, 58))
             textSize = 16f
             setTypeface(null, Typeface.BOLD)
@@ -81,7 +82,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(heading)
 
         output = TextView(this).apply {
-            text = "監測尚未啟動。\n真正的數據重連需先授權 Shizuku。"
+            text = "監測尚未啟動。\n可啟用本 App 輔助重連，不需要 Shizuku、Wi-Fi 或電腦。"
             textSize = 12f
             typeface = Typeface.MONOSPACE
             setTextColor(Color.rgb(30, 40, 50))
@@ -108,7 +109,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         statusLine = TextView(this).apply {
-            text = "Shizuku：尚未連線"
+            text = "輔助重連：尚未啟用"
             textSize = 13f
             setTextColor(Color.rgb(55, 65, 80))
             maxLines = 2
@@ -117,7 +118,7 @@ class MainActivity : AppCompatActivity() {
         controls.addView(statusLine)
 
         grantButton = Button(this).apply {
-            text = "啟用 Shizuku 重連權限"
+            text = "啟用輔助重連（不需 Shizuku）"
             textSize = 15f
             isAllCaps = false
             setTextColor(Color.rgb(30, 45, 65))
@@ -194,37 +195,84 @@ class MainActivity : AppCompatActivity() {
             uploadSnapshot("SHIZUKU:" + message)
             runOnUiThread {
                 statusLine.text = when {
-                    message == "SHIZUKU_SERVICE_READY" -> "Shizuku：已授權，可使用重連"
-                    message == "SHIZUKU_BINDING_SERVICE" -> "Shizuku：正在連線…"
-                    message == "SHIZUKU_REQUESTING_PERMISSION" -> "Shizuku：等待授權"
-                    message.startsWith("SHIZUKU_NOT_RUNNING") -> "Shizuku：未啟動，請先啟動 Shizuku App"
+                    message == "SHIZUKU_SERVICE_READY" -> "進階 Shizuku：已授權"
+                    message == "SHIZUKU_BINDING_SERVICE" -> "進階 Shizuku：正在連線…"
+                    message == "SHIZUKU_REQUESTING_PERMISSION" -> "進階 Shizuku：等待授權"
+                    message.startsWith("SHIZUKU_NOT_RUNNING") -> "輔助重連不需 Shizuku"
                     message == "SHIZUKU_PERMISSION_DENIED" -> "Shizuku：權限未允許"
-                    message == "SHIZUKU_BINDER_DEAD" -> "Shizuku：連線中斷，請重新啟動"
+                    message == "SHIZUKU_BINDER_DEAD" -> "Shizuku：連線中斷"
                     else -> "Shizuku：" + message
                 }
             }
         }
-        grantButton.setOnClickListener { shizukuRecovery.requestEnable() }
+        grantButton.setOnClickListener {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            Toast.makeText(this, "請啟用「網路診斷：快速重連輔助」", Toast.LENGTH_LONG).show()
+        }
         runButton.setOnClickListener { permissionsAndRun() }
         stopButton.setOnClickListener { stopMonitor() }
-        resetNowButton.setOnClickListener {
-            if (!shizukuRecovery.enabled) {
-                Toast.makeText(this, "請先啟動並授權 Shizuku", Toast.LENGTH_LONG).show()
-            } else {
-                executor.execute {
-                    val result = performDataCycle("MANUAL")
-                    appendLine("MANUAL," + now() + "," + result)
-                    runOnUiThread {
-                        output.text = currentLog().takeLast(60000)
-                        Toast.makeText(this, result, Toast.LENGTH_LONG).show()
+        resetNowButton.setOnClickListener { beginManualRecovery() }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::statusLine.isInitialized) {
+            statusLine.text = if (QuickPanelRecoveryService.active != null)
+                "輔助重連：已啟用（手動模式）"
+            else "輔助重連：尚未啟用（請按下方授權）"
+        }
+    }
+
+    private fun beginManualRecovery() {
+        if (ActivityCompat.checkSelfPermission(
+                this, Manifest.permission.READ_PHONE_STATE
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this, arrayOf(Manifest.permission.READ_PHONE_STATE), 10
+            )
+            return
+        }
+        val service = QuickPanelRecoveryService.active
+        if (service != null) {
+            statusLine.text = "輔助重連：正在操作系統快速設定…"
+            appendLine("RECOVERY," + now() + ",UI_RECOVERY_REQUESTED_BY_USER")
+            uploadSnapshot("UI_RECOVERY_REQUESTED")
+            service.requestManualCycle { result ->
+                appendLine("RECOVERY," + now() + "," + result)
+                uploadSnapshot("UI_RECOVERY_RESULT:" + result)
+                runOnUiThread {
+                    statusLine.text = when {
+                        result == "UI_DATA_ENABLED_VERIFY_INTERNET_SEPARATELY" ->
+                            "已重新開啟數據，仍需驗證能否上網"
+                        result.contains("MANUALLY") ->
+                            "未能完成：請在快速設定確認行動數據已開啟"
+                        else -> "輔助重連：" + result
                     }
+                    output.text = currentLog().takeLast(60000)
+                    Toast.makeText(this, statusLine.text, Toast.LENGTH_LONG).show()
                 }
             }
+        } else if (shizukuRecovery.enabled) {
+            executor.execute {
+                val result = performDataCycle("MANUAL")
+                appendLine("MANUAL," + now() + "," + result)
+                runOnUiThread {
+                    statusLine.text = "Shizuku：" + result
+                    output.text = currentLog().takeLast(60000)
+                }
+            }
+        } else {
+            Toast.makeText(
+                this, "先啟用本 App 的「網路診斷：快速重連輔助」，不需要 Shizuku",
+                Toast.LENGTH_LONG
+            ).show()
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
     }
 
     private fun permissionsAndRun(){val p=arrayOf(Manifest.permission.READ_PHONE_STATE,Manifest.permission.ACCESS_FINE_LOCATION);val m=p.filter{ActivityCompat.checkSelfPermission(this,it)!=PackageManager.PERMISSION_GRANTED};if(m.isNotEmpty())ActivityCompat.requestPermissions(this,m.toTypedArray(),9)else startMonitor()}
-    override fun onRequestPermissionsResult(r:Int,p:Array<out String>,g:IntArray){super.onRequestPermissionsResult(r,p,g);if(r==9&&g.all{it==PackageManager.PERMISSION_GRANTED})startMonitor()}
+    override fun onRequestPermissionsResult(r:Int,p:Array<out String>,g:IntArray){super.onRequestPermissionsResult(r,p,g);if(r==9&&g.all{it==PackageManager.PERMISSION_GRANTED})startMonitor();if(r==10&&g.isNotEmpty()&&g.all{it==PackageManager.PERMISSION_GRANTED})beginManualRecovery()}
 
     private val defaultCallback=object:ConnectivityManager.NetworkCallback(){
         override fun onAvailable(n:Network)=callbackEvent("AVAILABLE:$n"); override fun onLost(n:Network)=callbackEvent("LOST:$n")
@@ -236,7 +284,7 @@ class MainActivity : AppCompatActivity() {
     private fun startMonitor(){
         val serviceIntent=Intent(this,NetworkMonitorService::class.java)
         if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.O) startForegroundService(serviceIntent) else startService(serviceIntent)
-        monitor?.cancel(false);synchronized(this){lines.clear()};sample=0;failureStartedAt=null;recoveryAttempts=0;nextRecoveryAt=0;lastGoodCell="";lastDnsOk=true;lastHttpsOk=true;lastRegisteredAt=System.currentTimeMillis();val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager;try{cm.unregisterNetworkCallback(defaultCallback)}catch(_:Exception){};cm.bindProcessToNetwork(null);cm.registerDefaultNetworkCallback(defaultCallback);appendLine("=== Network Diagnostic v11: opt-in Shizuku data-cycle ===");appendLine("SAMPLE,time,n,transport,rat,voiceReg,dataState,event,registered,pci,earfcn,band,tac,ci,rsrp,rsrq,rssi,sinr,dns,https,recovery");runButton.isEnabled=false;stopButton.isEnabled=true;monitor=executor.scheduleAtFixedRate({takeSample()},0,1,TimeUnit.SECONDS);uploadSnapshot("MONITOR_STARTED_V11")}
+        monitor?.cancel(false);synchronized(this){lines.clear()};sample=0;failureStartedAt=null;recoveryAttempts=0;nextRecoveryAt=0;lastGoodCell="";lastDnsOk=true;lastHttpsOk=true;lastRegisteredAt=System.currentTimeMillis();val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager;try{cm.unregisterNetworkCallback(defaultCallback)}catch(_:Exception){};cm.bindProcessToNetwork(null);cm.registerDefaultNetworkCallback(defaultCallback);appendLine("=== Network Diagnostic v12: manual Android Quick Settings recovery ===");appendLine("SAMPLE,time,n,transport,rat,voiceReg,dataState,event,registered,pci,earfcn,band,tac,ci,rsrp,rsrq,rssi,sinr,dns,https,recovery");runButton.isEnabled=false;stopButton.isEnabled=true;monitor=executor.scheduleAtFixedRate({takeSample()},0,1,TimeUnit.SECONDS);uploadSnapshot("MONITOR_STARTED_V12")}
 
     private fun requestCellularRecovery(reason:String):String{val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager;recoveryAttempts++;val a=recoveryAttempts;nextRecoveryAt=System.currentTimeMillis()+10000;cm.bindProcessToNetwork(null);recoveryCallback?.let{try{cm.unregisterNetworkCallback(it)}catch(_:Exception){}};recoveryCallback=null
         appendLine("RECOVERY,${now()},RESET_OLD_REQUEST,attempt=$a");appendLine("RECOVERY,${now()},REQUEST_CELLULAR,attempt=$a,reason=$reason");uploadSnapshot("REQUEST_CELLULAR#$a:$reason")
@@ -258,6 +306,6 @@ class MainActivity : AppCompatActivity() {
             if(sample%5==0){val td=System.nanoTime();try{val a=InetAddress.getAllByName("www.google.com");dok=true;dns="OK:${(System.nanoTime()-td)/1_000_000}ms:${a.firstOrNull()?.hostAddress}"}catch(e:Exception){dok=false;dns="FAIL:${e.javaClass.simpleName}"};lastDnsOk=dok;val th=System.nanoTime();try{val h=URL("https://www.google.com/generate_204").openConnection() as HttpURLConnection;h.connectTimeout=4000;h.readTimeout=4000;h.useCaches=false;val code=h.responseCode;hok=code in 200..399;https="$code:${(System.nanoTime()-th)/1_000_000}ms";h.disconnect()}catch(e:Exception){hok=false;https="FAIL:${e.javaClass.simpleName}"};lastHttpsOk=hok}}
         catch(e:Exception){hok=false;lastHttpsOk=false;https="ERR:${e.javaClass.simpleName}"};val cell="$pci/$ef/$ci";val rec=recoveryState(reg,tr,dok,hok,cell);appendLine("SAMPLE,${now()},$sample,$tr,$rat,$voice,$ds,${netEvent.replace(',',';')},$reg,$pci,$ef,$band,$tac,$ci,$rsrp,$rsrq,$rssi,$sinr,$dns,$https,$rec");if(sample%10==0)uploadSnapshot("LIVE_STATUS:$tr:$rat:reg=$reg:pci=$pci:earfcn=$ef:band=$band:rsrp=$rsrp:rsrq=$rsrq:sinr=$sinr:dns=$dns:https=$https:recovery=$rec");val text=currentLog();runOnUiThread{output.text=text.takeLast(60000)}}
 
-    private fun stopMonitor(){stopService(Intent(this,NetworkMonitorService::class.java));monitor?.cancel(false);monitor=null;val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager;try{cm.unregisterNetworkCallback(defaultCallback)}catch(_:Exception){};recoveryCallback?.let{try{cm.unregisterNetworkCallback(it)}catch(_:Exception){}};recoveryCallback=null;cm.bindProcessToNetwork(null);uploadSnapshot("MONITOR_STOPPED_V11");runButton.isEnabled=true;stopButton.isEnabled=false;output.text=currentLog().takeLast(60000)}
+    private fun stopMonitor(){stopService(Intent(this,NetworkMonitorService::class.java));monitor?.cancel(false);monitor=null;val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager;try{cm.unregisterNetworkCallback(defaultCallback)}catch(_:Exception){};recoveryCallback?.let{try{cm.unregisterNetworkCallback(it)}catch(_:Exception){}};recoveryCallback=null;cm.bindProcessToNetwork(null);uploadSnapshot("MONITOR_STOPPED_V12");runButton.isEnabled=true;stopButton.isEnabled=false;output.text=currentLog().takeLast(60000)}
     override fun onDestroy(){stopMonitor();shizukuRecovery.close();executor.shutdownNow();uploadExecutor.shutdown();super.onDestroy()}
 }
