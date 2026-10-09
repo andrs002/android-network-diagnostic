@@ -2,10 +2,12 @@ package com.andrs002.networkdiagnostic
 
 import android.Manifest
 import android.content.Context
+import android.content.res.ColorStateList
 import android.content.Intent
 import android.os.Build
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Typeface
 import android.net.*
 import android.os.Bundle
 import android.telephony.*
@@ -24,7 +26,7 @@ import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : AppCompatActivity() {
-    private lateinit var output:TextView; private lateinit var runButton:Button; private lateinit var stopButton:Button; private lateinit var grantButton:Button; private lateinit var resetNowButton:Button; private lateinit var telemetry:TelemetryUploader; private lateinit var shizukuRecovery:ShizukuRecovery
+    private lateinit var output:TextView; private lateinit var statusLine:TextView; private lateinit var runButton:Button; private lateinit var stopButton:Button; private lateinit var grantButton:Button; private lateinit var resetNowButton:Button; private lateinit var telemetry:TelemetryUploader; private lateinit var shizukuRecovery:ShizukuRecovery
     private val executor=Executors.newSingleThreadScheduledExecutor(); private val uploadExecutor=Executors.newSingleThreadExecutor(); private var monitor:ScheduledFuture<*>?=null
     private val cycling=AtomicBoolean(false);@Volatile private var lastDataCycleAt=0L
     private val lines=ArrayDeque<String>(); private var sample=0; @Volatile private var netEvent="INIT"; private var failureStartedAt:Long?=null; private var recoveryAttempts=0; private var nextRecoveryAt=0L; private var recoveryCallback:ConnectivityManager.NetworkCallback?=null
@@ -35,9 +37,168 @@ class MainActivity : AppCompatActivity() {
     private fun callbackEvent(s:String){netEvent=s;appendLine("EVENT,${now()},${s.replace(',',';')}")}
     private fun uploadSnapshot(summary:String){telemetry.enqueue(summary,currentLog());uploadExecutor.execute{appendLine("TELEMETRY,${now()},${telemetry.flush()}")}}
 
-    override fun onCreate(b:Bundle?){super.onCreate(b);telemetry=TelemetryUploader(applicationContext);val d=resources.displayMetrics.density;val p=(16*d).toInt();val box=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(p,p,p,p)}
-        runButton=Button(this).apply{text="開始網路診斷與自動補救 v11";textSize=18f;setTextColor(Color.WHITE);setBackgroundColor(Color.rgb(0,100,200));isAllCaps=false;layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,(72*d).toInt()).apply{bottomMargin=p}}
-        stopButton=Button(this).apply{text="停止監測";isAllCaps=false;isEnabled=false};output=TextView(this).apply{text="Network Diagnostic v11\n真正的行動數據重連需啟用 Shizuku。未授權時僅診斷，不會假裝已修復。";textSize=14f;setTextIsSelectable(true)};grantButton=Button(this).apply{text="授權 Shizuku：啟用真正的數據重連";isAllCaps=false};resetNowButton=Button(this).apply{text="立即重連行動數據（Shizuku）";isAllCaps=false};box.addView(grantButton);box.addView(resetNowButton);box.addView(runButton);box.addView(stopButton);box.addView(output);setContentView(ScrollView(this).apply{addView(box)});runButton.setOnClickListener{permissionsAndRun()};stopButton.setOnClickListener{stopMonitor()};shizukuRecovery=ShizukuRecovery(this){ msg-> appendLine("SHIZUKU,"+now()+","+msg);uploadSnapshot("SHIZUKU:"+msg) };grantButton.setOnClickListener{shizukuRecovery.requestEnable()};resetNowButton.setOnClickListener{if(!shizukuRecovery.enabled){Toast.makeText(this,"請先啟動並授權 Shizuku",Toast.LENGTH_LONG).show()}else{executor.execute{val result=performDataCycle("MANUAL");appendLine("MANUAL,"+now()+","+result);runOnUiThread{output.text=currentLog().takeLast(60000)}}}}}
+    override fun onCreate(b: Bundle?) {
+        super.onCreate(b)
+        telemetry = TelemetryUploader(applicationContext)
+        val density = resources.displayMetrics.density
+        val dp = { value: Int -> (value * density + 0.5f).toInt() }
+
+        // Only the diagnostic output scrolls. Recovery controls stay above the
+        // navigation bar, reachable even when the log grows to thousands of lines.
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(dp(12), dp(8), dp(12), 0)
+        }
+
+        val heading = TextView(this).apply {
+            text = "網路診斷 v11　｜　監測紀錄"
+            setTextColor(Color.rgb(35, 45, 58))
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(dp(4), dp(4), dp(4), dp(8))
+        }
+        root.addView(heading)
+
+        output = TextView(this).apply {
+            text = "監測尚未啟動。\\n真正的數據重連需先授權 Shizuku。"
+            textSize = 12f
+            typeface = Typeface.MONOSPACE
+            setTextColor(Color.rgb(30, 40, 50))
+            setTextIsSelectable(true)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+        val logScroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(output)
+        }
+        root.addView(
+            logScroll,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
+            )
+        )
+
+        // Fixed control panel, separate from the scrolling log.
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.rgb(243, 246, 251))
+            setPadding(dp(8), dp(10), dp(8), dp(10))
+            elevation = dp(4).toFloat()
+        }
+
+        statusLine = TextView(this).apply {
+            text = "Shizuku：尚未連線"
+            textSize = 13f
+            setTextColor(Color.rgb(55, 65, 80))
+            setPadding(dp(4), 0, dp(4), dp(7))
+        }
+        controls.addView(statusLine)
+
+        grantButton = Button(this).apply {
+            text = "啟用 Shizuku 重連權限"
+            textSize = 15f
+            isAllCaps = false
+            setTextColor(Color.rgb(30, 45, 65))
+            backgroundTintList = ColorStateList.valueOf(Color.rgb(220, 229, 241))
+        }
+        controls.addView(
+            grantButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(54)
+            ).apply { bottomMargin = dp(8) }
+        )
+
+        runButton = Button(this).apply {
+            text = "開始監測"
+            textSize = 16f
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            backgroundTintList = ColorStateList.valueOf(Color.rgb(26, 99, 180))
+        }
+        stopButton = Button(this).apply {
+            text = "停止監測"
+            textSize = 16f
+            isAllCaps = false
+            isEnabled = false
+        }
+        val monitorRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(
+                runButton,
+                LinearLayout.LayoutParams(0, dp(58), 1f).apply {
+                    rightMargin = dp(6)
+                }
+            )
+            addView(
+                stopButton,
+                LinearLayout.LayoutParams(0, dp(58), 1f).apply {
+                    leftMargin = dp(6)
+                }
+            )
+        }
+        controls.addView(
+            monitorRow,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(58)
+            ).apply { bottomMargin = dp(10) }
+        )
+
+        resetNowButton = Button(this).apply {
+            text = "立即重連行動數據"
+            textSize = 19f
+            setTypeface(null, Typeface.BOLD)
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            backgroundTintList = ColorStateList.valueOf(Color.rgb(0, 115, 113))
+        }
+        controls.addView(
+            resetNowButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(76)
+            )
+        )
+
+        root.addView(
+            controls,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        setContentView(root)
+
+        shizukuRecovery = ShizukuRecovery(this) { message ->
+            appendLine("SHIZUKU," + now() + "," + message)
+            uploadSnapshot("SHIZUKU:" + message)
+            runOnUiThread {
+                statusLine.text = when {
+                    message == "SHIZUKU_SERVICE_READY" -> "Shizuku：已授權，可使用重連"
+                    message == "SHIZUKU_BINDING_SERVICE" -> "Shizuku：正在連線…"
+                    message == "SHIZUKU_REQUESTING_PERMISSION" -> "Shizuku：等待授權"
+                    else -> "Shizuku：" + message
+                }
+            }
+        }
+        grantButton.setOnClickListener { shizukuRecovery.requestEnable() }
+        runButton.setOnClickListener { permissionsAndRun() }
+        stopButton.setOnClickListener { stopMonitor() }
+        resetNowButton.setOnClickListener {
+            if (!shizukuRecovery.enabled) {
+                Toast.makeText(this, "請先啟動並授權 Shizuku", Toast.LENGTH_LONG).show()
+            } else {
+                executor.execute {
+                    val result = performDataCycle("MANUAL")
+                    appendLine("MANUAL," + now() + "," + result)
+                    runOnUiThread {
+                        output.text = currentLog().takeLast(60000)
+                        Toast.makeText(this, result, Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+    }
+
     private fun permissionsAndRun(){val p=arrayOf(Manifest.permission.READ_PHONE_STATE,Manifest.permission.ACCESS_FINE_LOCATION);val m=p.filter{ActivityCompat.checkSelfPermission(this,it)!=PackageManager.PERMISSION_GRANTED};if(m.isNotEmpty())ActivityCompat.requestPermissions(this,m.toTypedArray(),9)else startMonitor()}
     override fun onRequestPermissionsResult(r:Int,p:Array<out String>,g:IntArray){super.onRequestPermissionsResult(r,p,g);if(r==9&&g.all{it==PackageManager.PERMISSION_GRANTED})startMonitor()}
 
