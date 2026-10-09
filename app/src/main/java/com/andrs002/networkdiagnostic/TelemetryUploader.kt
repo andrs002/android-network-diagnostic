@@ -21,11 +21,11 @@ class TelemetryUploader(private val context: Context) {
     fun enqueue(summary: String, rawLines: String) = synchronized(lock) {
         val ts = Instant.now().toString()
         val eventType = summary.substringBefore(':').substringBefore(',').ifBlank { "EVENT" }.take(64)
-        val raw = JSONObject().put("summary", summary).put("log", rawLines.takeLast(24000)).put("app", "network-diagnostic-v11")
+        val raw = JSONObject().put("summary", summary).put("log", rawLines.takeLast(24000)).put("app", "network-diagnostic-v12")
         val item = JSONObject()
             .put("record_key", sha256("$deviceId|$ts|$summary"))
             .put("start_time", ts).put("event_type", eventType).put("summary", summary)
-            .put("source_device", android.os.Build.MODEL).put("app_version", "network-diagnostic-v11").put("raw", raw)
+            .put("source_device", android.os.Build.MODEL).put("app_version", "network-diagnostic-v12").put("raw", raw)
         if (eventType == "LIVE_STATUS") {
             val q = readQueue().filterNot { it.optString("event_type") == "LIVE_STATUS" }.toMutableList()
             q.add(item)
