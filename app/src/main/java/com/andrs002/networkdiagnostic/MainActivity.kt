@@ -77,7 +77,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val heading = TextView(this).apply {
-            text = "網路診斷 v12　｜　監測紀錄"
+            text = "網路診斷 v13　｜　監測紀錄"
             setTextColor(Color.rgb(35, 45, 58))
             textSize = 16f
             setTypeface(null, Typeface.BOLD)
@@ -240,7 +240,7 @@ class MainActivity : AppCompatActivity() {
             ).orEmpty()
             setting.split(':').any { entry ->
                 val component = ComponentName.unflattenFromString(entry.trim())
-                component?.packageName == target.packageName &&
+                component != null && component.packageName == target.packageName &&
                     component.className == target.className
             }
         } catch (_: Exception) {
@@ -346,7 +346,7 @@ class MainActivity : AppCompatActivity() {
     private fun startMonitor(){
         val serviceIntent=Intent(this,NetworkMonitorService::class.java)
         if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.O) startForegroundService(serviceIntent) else startService(serviceIntent)
-        monitor?.cancel(false);synchronized(this){lines.clear()};sample=0;failureStartedAt=null;recoveryAttempts=0;nextRecoveryAt=0;lastGoodCell="";lastDnsOk=true;lastHttpsOk=true;lastRegisteredAt=System.currentTimeMillis();val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager;try{cm.unregisterNetworkCallback(defaultCallback)}catch(_:Exception){};cm.bindProcessToNetwork(null);cm.registerDefaultNetworkCallback(defaultCallback);appendLine("=== Network Diagnostic v12: manual Android Quick Settings recovery ===");appendLine("SAMPLE,time,n,transport,rat,voiceReg,dataState,event,registered,pci,earfcn,band,tac,ci,rsrp,rsrq,rssi,sinr,dns,https,recovery");runButton.isEnabled=false;stopButton.isEnabled=true;monitor=executor.scheduleAtFixedRate({takeSample()},0,1,TimeUnit.SECONDS);uploadSnapshot("MONITOR_STARTED_V12")}
+        monitor?.cancel(false);synchronized(this){lines.clear()};sample=0;failureStartedAt=null;recoveryAttempts=0;nextRecoveryAt=0;lastGoodCell="";lastDnsOk=true;lastHttpsOk=true;lastRegisteredAt=System.currentTimeMillis();val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager;try{cm.unregisterNetworkCallback(defaultCallback)}catch(_:Exception){};cm.bindProcessToNetwork(null);cm.registerDefaultNetworkCallback(defaultCallback);appendLine("=== Network Diagnostic v13: verify accessibility permission and connection separately ===");appendLine("SAMPLE,time,n,transport,rat,voiceReg,dataState,event,registered,pci,earfcn,band,tac,ci,rsrp,rsrq,rssi,sinr,dns,https,recovery");runButton.isEnabled=false;stopButton.isEnabled=true;monitor=executor.scheduleAtFixedRate({takeSample()},0,1,TimeUnit.SECONDS);uploadSnapshot("MONITOR_STARTED_V13")}
 
     private fun requestCellularRecovery(reason:String):String{val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager;recoveryAttempts++;val a=recoveryAttempts;nextRecoveryAt=System.currentTimeMillis()+10000;cm.bindProcessToNetwork(null);recoveryCallback?.let{try{cm.unregisterNetworkCallback(it)}catch(_:Exception){}};recoveryCallback=null
         appendLine("RECOVERY,${now()},RESET_OLD_REQUEST,attempt=$a");appendLine("RECOVERY,${now()},REQUEST_CELLULAR,attempt=$a,reason=$reason");uploadSnapshot("REQUEST_CELLULAR#$a:$reason")
@@ -368,6 +368,6 @@ class MainActivity : AppCompatActivity() {
             if(sample%5==0){val td=System.nanoTime();try{val a=InetAddress.getAllByName("www.google.com");dok=true;dns="OK:${(System.nanoTime()-td)/1_000_000}ms:${a.firstOrNull()?.hostAddress}"}catch(e:Exception){dok=false;dns="FAIL:${e.javaClass.simpleName}"};lastDnsOk=dok;val th=System.nanoTime();try{val h=URL("https://www.google.com/generate_204").openConnection() as HttpURLConnection;h.connectTimeout=4000;h.readTimeout=4000;h.useCaches=false;val code=h.responseCode;hok=code in 200..399;https="$code:${(System.nanoTime()-th)/1_000_000}ms";h.disconnect()}catch(e:Exception){hok=false;https="FAIL:${e.javaClass.simpleName}"};lastHttpsOk=hok}}
         catch(e:Exception){hok=false;lastHttpsOk=false;https="ERR:${e.javaClass.simpleName}"};val cell="$pci/$ef/$ci";val rec=recoveryState(reg,tr,dok,hok,cell);appendLine("SAMPLE,${now()},$sample,$tr,$rat,$voice,$ds,${netEvent.replace(',',';')},$reg,$pci,$ef,$band,$tac,$ci,$rsrp,$rsrq,$rssi,$sinr,$dns,$https,$rec");if(sample%10==0)uploadSnapshot("LIVE_STATUS:$tr:$rat:reg=$reg:pci=$pci:earfcn=$ef:band=$band:rsrp=$rsrp:rsrq=$rsrq:sinr=$sinr:dns=$dns:https=$https:recovery=$rec");val text=currentLog();runOnUiThread{output.text=text.takeLast(60000)}}
 
-    private fun stopMonitor(){stopService(Intent(this,NetworkMonitorService::class.java));monitor?.cancel(false);monitor=null;val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager;try{cm.unregisterNetworkCallback(defaultCallback)}catch(_:Exception){};recoveryCallback?.let{try{cm.unregisterNetworkCallback(it)}catch(_:Exception){}};recoveryCallback=null;cm.bindProcessToNetwork(null);uploadSnapshot("MONITOR_STOPPED_V12");runButton.isEnabled=true;stopButton.isEnabled=false;output.text=currentLog().takeLast(60000)}
+    private fun stopMonitor(){stopService(Intent(this,NetworkMonitorService::class.java));monitor?.cancel(false);monitor=null;val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager;try{cm.unregisterNetworkCallback(defaultCallback)}catch(_:Exception){};recoveryCallback?.let{try{cm.unregisterNetworkCallback(it)}catch(_:Exception){}};recoveryCallback=null;cm.bindProcessToNetwork(null);uploadSnapshot("MONITOR_STOPPED_V13");runButton.isEnabled=true;stopButton.isEnabled=false;output.text=currentLog().takeLast(60000)}
     override fun onDestroy(){uiHandler.removeCallbacksAndMessages(null);stopMonitor();shizukuRecovery.close();executor.shutdownNow();uploadExecutor.shutdown();super.onDestroy()}
 }
